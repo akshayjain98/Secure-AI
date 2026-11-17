@@ -1,0 +1,34 @@
+services:
+  postgres:
+    image: postgres:17.6
+    container_name: secureai-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: postgres
+      # Consumed only by the bootstrap script on first initialisation.
+      SECUREAI_MIGRATOR_PASSWORD: ${SECUREAI_MIGRATOR_PASSWORD:?set in .env}
+      SECUREAI_APP_PASSWORD: ${SECUREAI_APP_PASSWORD:?set in .env}
+      SECUREAI_DATABASES: "${SECUREAI_DB_NAME:-secureai} ${SECUREAI_TEST_DB_NAME:-secureai_test}"
+    command:
+      - postgres
+      - -c
+      - password_encryption=scram-sha-256
+      - -c
+      - log_connections=on
+      - -c
+      - log_statement=ddl
+    ports:
+      # Bind to loopback only: the database must never be reachable from the LAN.
+      - "127.0.0.1:${SECUREAI_DB_PORT:-55432}:5432"
+    volumes:
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+      - secureai-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  secureai-pgdata:
