@@ -28,6 +28,10 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres \
      -v app_pw="$SECUREAI_APP_PASSWORD" <<'EOSQL'
 CREATE ROLE secureai_owner       NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 CREATE ROLE secureai_rls_definer NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS;
+-- Owns the pre-authentication SECURITY DEFINER functions (login, refresh
+-- rotation, password reset). Separate from secureai_rls_definer, which is
+-- read-only: this role may write credentials, sessions and reset tokens.
+CREATE ROLE secureai_auth_definer NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS;
 CREATE ROLE secureai_migrator    LOGIN   NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS
        PASSWORD :'migrator_pw';
 CREATE ROLE secureai_app         LOGIN   NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT
@@ -37,6 +41,7 @@ CREATE ROLE secureai_app         LOGIN   NOSUPERUSER NOCREATEDB NOCREATEROLE NOR
 -- SET ROLE to the definer role to create helper functions owned by it.
 GRANT secureai_owner       TO secureai_migrator;
 GRANT secureai_rls_definer TO secureai_migrator;
+GRANT secureai_auth_definer TO secureai_migrator;
 
 -- Defensive session defaults for the application role.
 ALTER ROLE secureai_app SET statement_timeout = '15s';
@@ -63,6 +68,7 @@ REVOKE ALL ON SCHEMA public FROM PUBLIC;
 -- revoke a global default, so this must be done without IN SCHEMA.)
 ALTER DEFAULT PRIVILEGES FOR ROLE secureai_owner       REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE secureai_rls_definer REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE secureai_auth_definer REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 
 -- Alembic bookkeeping lives in its own schema, owned by the owner role.
 CREATE SCHEMA secureai_migrations AUTHORIZATION secureai_owner;

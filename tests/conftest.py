@@ -11,8 +11,10 @@ Two kinds of connections are used, and the distinction matters:
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import uuid
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 import psycopg
@@ -20,6 +22,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 
+from app.auth.passwords import hash_password
 from app.db import seed_dev
 from app.db.dsn import psycopg_conninfo, sqlalchemy_url, testing_database_name
 from app.db.seed_dev import ID
@@ -31,6 +34,7 @@ TEST_DB = testing_database_name()
 @pytest.fixture(scope="session", autouse=True)
 def _database() -> Iterator[None]:
     with psycopg.connect(psycopg_conninfo("migrator", TEST_DB), autocommit=True) as conn:
+        conn.execute("DROP SCHEMA IF EXISTS secureai_auth CASCADE")
         conn.execute("DROP SCHEMA IF EXISTS secureai_rls CASCADE")
         conn.execute("DROP SCHEMA IF EXISTS secureai CASCADE")
         conn.execute("DROP TABLE IF EXISTS secureai_migrations.alembic_version")
@@ -80,3 +84,41 @@ def ids(conn: psycopg.Connection, sql: str, params: tuple = ()) -> set:
 def rowcount(conn: psycopg.Connection, sql: str, params: tuple = ()) -> int:
     cur = conn.execute(sql, params)
     return cur.rowcount
+
+
+@dataclass(frozen=True)
+class FreshUser:
+    id: uuid.UUID
+    email: str
+    password: str
+
+
+@pytest.fixture
+def make_user(admin_conn) -> Callable[..., FreshUser]:
+    """Create an isolated user, so lockout/reset tests never disturb seed users."""
+    def _make(password: str = "correct-horse-battery-staple", status: str = "active",
+              password_hash: str | None = None) -> FreshUser:
+        uid = uuid.uuid4()
+        email = f"user-{uid.hex[:12]}@test.example"
+        admin_conn.execute(
+            "INSERT INTO secureai.users (id, email, display_name, status) VALUES (%s, %s, %s, %s)",
+            (uid, email, "Test User", status))
+        admin_conn.execute(
+            "INSERT INTO secureai.user_credentials (user_id, password_hash) VALUES (%s, %s)",
+            (uid, password_hash or hash_password(password)))
+        return FreshUser(uid, email, password)
+    return _make
+
+
+@pytest.fixture
+def new_app_conn() -> Callable[..., psycopg.Connection]:
+    """Factory for extra app connections (concurrency tests). Closed at teardown."""
+    conns: list[psycopg.Connection] = []
+
+    def _open(autocommit: bool = True) -> psycopg.Connection:
+        conn = psycopg.connect(psycopg_conninfo("app", TEST_DB), autocommit=autocommit)
+        conns.append(conn)
+        return conn
+    yield _open
+    for conn in conns:
+        conn.close()

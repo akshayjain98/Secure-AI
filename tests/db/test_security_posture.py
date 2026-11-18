@@ -84,7 +84,7 @@ def test_no_function_in_our_schemas_is_executable_by_public(admin_conn):
     public_exec = admin_conn.execute(
         "SELECT n.nspname || '.' || p.proname FROM pg_proc p "
         "JOIN pg_namespace n ON n.oid = p.pronamespace "
-        "WHERE n.nspname IN ('secureai', 'secureai_rls') "
+        "WHERE n.nspname IN ('secureai', 'secureai_rls', 'secureai_auth') "
         "AND has_function_privilege('public', p.oid, 'EXECUTE')").fetchall()
     assert public_exec == []
 
@@ -92,7 +92,7 @@ def test_no_function_in_our_schemas_is_executable_by_public(admin_conn):
 def test_security_definer_functions_pin_search_path(admin_conn):
     unpinned = admin_conn.execute(
         "SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
-        "WHERE n.nspname IN ('secureai', 'secureai_rls') AND p.prosecdef "
+        "WHERE n.nspname IN ('secureai', 'secureai_rls', 'secureai_auth') AND p.prosecdef "
         "AND NOT EXISTS (SELECT 1 FROM unnest(p.proconfig) c WHERE c LIKE 'search_path=%%')"
     ).fetchall()
     assert unpinned == []

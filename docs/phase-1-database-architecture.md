@@ -43,6 +43,7 @@ The mutation tests in §8.3 show each layer catching what another layer misses.
 | Role | Login | BYPASSRLS | Owns | Used by | Why it exists |
 |---|---|---|---|---|---|
 | `secureai_owner` | no | **no** | schemas, tables | nobody directly | A NOLOGIN owner means no credential can ever "be" the owner. `FORCE ROW LEVEL SECURITY` subjects the owner to RLS too. |
+| `secureai_auth_definer` *(Phase 2)* | no | yes | `secureai_auth` functions | pre-auth flows (via SECURITY DEFINER) | Column-scoped read/write on credentials, refresh sessions, reset tokens; audit append. No tenant tables. See phase-2 doc §2. |
 | `secureai_rls_definer` | no | yes | RLS helper functions | policies (via SECURITY DEFINER) | Helpers must read memberships/projects without recursive RLS. The role has SELECT on 9 authorization tables and nothing else: no login, no writes. |
 | `secureai_migrator` | yes | yes | — (member of owner and definer) | Alembic, seed, ops | Schema changes and trusted maintenance. **Never deployed with the API.** |
 | `secureai_app` | yes | **no** | **nothing** | FastAPI | NOINHERIT, member of no role, `search_path = pg_catalog`, `statement_timeout = 15s`. |
@@ -55,7 +56,9 @@ Only `00-bootstrap.sh` uses superuser, and only once.
 - The context lasts exactly one transaction.
 - The context can't be switched mid-transaction.
 
-If the API process is fully compromised, the attacker can impersonate users through `set_context`. Even then they can't read password hashes, refresh or reset token hashes, modify RBAC, bypass org fences within one context, back-date or delete audit events, or run DDL.
+If the API process is fully compromised, the attacker can impersonate users through `set_context`. Even then they can't bulk-read password hashes, read refresh or reset token hashes, modify RBAC, bypass org fences within one context, back-date or delete audit events, or run DDL.
+
+> **Phase 2 amendment.** Argon2 verification runs in the app, so `secureai_auth.begin_login()` returns *one* user's hash per call. Every call counts toward the 5-attempt lockout *before* verification and is audited, so extraction is rate-limited per account and leaves a trail. See [phase-2-authentication.md](phase-2-authentication.md) §7.
 
 ## 4. Schema
 

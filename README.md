@@ -6,10 +6,11 @@ database security, multi-tenancy, API security and AI application security.
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Database architecture, RBAC model, PostgreSQL RLS, seed data, DB security tests | ✅ done |
-| 2 | Authentication (Argon2id, JWT, refresh rotation/reuse detection, reset) | pending approval |
+| 2 | Authentication (Argon2id, JWT, refresh rotation/reuse detection, reset) | 🚧 step 1/3: DB auth layer + auth core done; JWT + HTTP API next |
 | 3+ | FastAPI authorization services, API tests, AI/LLM security, frontend | planned |
 
-Start with **[docs/phase-1-database-architecture.md](docs/phase-1-database-architecture.md)**.
+Start with **[docs/phase-1-database-architecture.md](docs/phase-1-database-architecture.md)**, then
+**[docs/phase-2-authentication.md](docs/phase-2-authentication.md)**.
 
 ## Quick start
 
@@ -19,6 +20,8 @@ Requirements: Docker, [uv](https://docs.astral.sh/uv/).
 cp .env.example .env     # replace every secret (openssl rand -hex 24)
 docker compose up -d --wait
 uv sync
+# existing volume from before Phase 2? run once first:
+#   docker exec -i secureai-postgres bash < docker/postgres/upgrades/0004_auth_definer_role.sh
 uv run alembic upgrade head
 uv run python -m app.db.seed_dev     # prints a generated dev password once
 uv run pytest -v                     # uses the separate secureai_test database
@@ -34,7 +37,10 @@ docker/postgres/init/00-bootstrap.sh   one-time superuser bootstrap: roles + dat
 migrations/versions/0001_*             tables, constraints, composite FKs
 migrations/versions/0002_*             grants, RLS helpers, policies, invariant triggers
 migrations/versions/0003_*             roles, permissions, role->permission matrix
+migrations/versions/0004_*             secureai_auth: login, refresh rotation, reset (definer fns)
+app/auth/                              argon2id + policy, opaque tokens, auth flows
 app/db/seed_dev.py                     fictional dev/test data (refuses in production)
-tests/db/                              DB-level security tests (RLS, grants, escalation)
+tests/db/                              DB-level security tests (RLS, grants, escalation, auth fns)
+tests/auth/                            auth primitives + end-to-end auth flows
 docs/                                  architecture + security documentation
 ```
