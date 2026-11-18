@@ -38,6 +38,16 @@ SECURITY_HEADERS = {
     "Cross-Origin-Resource-Policy": "same-origin",
 }
 
+DOCS_PATHS = frozenset({"/docs", "/docs/oauth2-redirect"})
+DOCS_CSP = (
+    "default-src 'none'; "
+    "script-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; "
+    "style-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; "
+    "img-src 'self' data: https://fastapi.tiangolo.com https://cdn.jsdelivr.net; "
+    "connect-src 'self'; "
+    "frame-ancestors 'none'"
+)
+
 
 def create_app(settings: Settings | None = None, pool: ConnectionPool | None = None,
                mailer: EmailSender | None = None,
@@ -84,6 +94,8 @@ def create_app(settings: Settings | None = None, pool: ConnectionPool | None = N
         request.state.request_id = uuid.uuid4().hex
         response = await call_next(request)
         response.headers["X-Request-ID"] = request.state.request_id
+        if docs and request.url.path in DOCS_PATHS:
+            response.headers["Content-Security-Policy"] = DOCS_CSP
         for k, v in SECURITY_HEADERS.items():
             response.headers.setdefault(k, v)
         return response
