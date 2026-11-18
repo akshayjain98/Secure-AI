@@ -6,6 +6,7 @@ Run (dev):  uv run uvicorn app.api.main:create_app --factory --port 8000
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -17,6 +18,7 @@ from app.api import routes_auth, routes_me
 from app.api.deps import AppState
 from app.api.email import ConsoleEmailSender, EmailSender
 from app.api.ratelimit import RateLimited, RateLimiter
+from app.auth.breach import BreachChecker, HibpChecker, NoBreachCheck
 from app.auth.jwt_tokens import AccessTokenCodec
 from app.auth.service import AuthService
 from app.auth.tokens import TokenHasher
@@ -37,8 +39,11 @@ SECURITY_HEADERS = {
 
 
 def create_app(settings: Settings | None = None, pool: ConnectionPool | None = None,
-               mailer: EmailSender | None = None) -> FastAPI:
+               mailer: EmailSender | None = None,
+               breach_checker: BreachChecker | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
+    if breach_checker is None:
+        breach_checker = HibpChecker() if settings.breach_check == "hibp" else NoBreachCheck()
     owns_pool = pool is None
     if pool is None:
         # Autocommit: request code opens explicit transactions; auth flows need it.
@@ -49,7 +54,7 @@ def create_app(settings: Settings | None = None, pool: ConnectionPool | None = N
     state = AppState(
         settings=settings,
         pool=pool,
-        service=AuthService(TokenHasher(settings.token_pepper), settings.auth),
+        service=AuthService(TokenHasher(settings.token_pepper), settings.auth, breach_checker),
         codec=AccessTokenCodec(settings.jwt_keys, settings.issuer, settings.audience,
                                settings.access_ttl),
         limiter=RateLimiter(),
@@ -73,8 +78,11 @@ def create_app(settings: Settings | None = None, pool: ConnectionPool | None = N
     app.state.secureai = state
 
     @app.middleware("http")
-    async def security_headers(request: Request, call_next):
+    async def request_id_and_security_headers(request: Request, call_next):
+        # Always server-generated: a client-supplied id could forge audit correlation.
+        request.state.request_id = uuid.uuid4().hex
         response = await call_next(request)
+        response.headers["X-Request-ID"] = request.state.request_id
         for k, v in SECURITY_HEADERS.items():
             response.headers.setdefault(k, v)
         return response

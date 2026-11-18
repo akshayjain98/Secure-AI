@@ -6,8 +6,9 @@ database security, multi-tenancy, API security and AI application security.
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Database architecture, RBAC model, PostgreSQL RLS, seed data, DB security tests | ✅ done |
-| 2 | Authentication (Argon2id, JWT, refresh rotation/reuse detection, reset) | 🚧 steps 1–2/3 done (DB auth layer, JWT, HTTP API); hardening next |
-| 3+ | FastAPI authorization services, API tests, AI/LLM security, frontend | planned |
+| 2 | Authentication (Argon2id, JWT, refresh rotation/reuse detection, reset) | ✅ done |
+| 3 | Authorization APIs (projects, tasks, documents, members) on RLS | next |
+| 4+ | AI/LLM security, frontend | planned |
 
 Start with **[docs/phase-1-database-architecture.md](docs/phase-1-database-architecture.md)**, then
 **[docs/phase-2-authentication.md](docs/phase-2-authentication.md)**.
@@ -39,6 +40,7 @@ migrations/versions/0001_*             tables, constraints, composite FKs
 migrations/versions/0002_*             grants, RLS helpers, policies, invariant triggers
 migrations/versions/0003_*             roles, permissions, role->permission matrix
 migrations/versions/0004_*             secureai_auth: login, refresh rotation, reset (definer fns)
+migrations/versions/0005_*             registration + email verification, request ids, last-admin guard
 app/auth/                              argon2id + policy, opaque tokens, JWT, auth flows
 app/api/                               FastAPI: /auth/*, /me, RLS-bound request transactions
 app/db/seed_dev.py                     fictional dev/test data (refuses in production)

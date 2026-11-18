@@ -55,6 +55,7 @@ def client_info(request: Request) -> ClientInfo:
     return ClientInfo(
         ip=_peer_ip(request),
         user_agent=(request.headers.get("user-agent") or "")[:512] or None,
+        request_id=getattr(request.state, "request_id", None),
     )
 
 
@@ -83,6 +84,7 @@ Claims = Annotated[AccessClaims, Depends(current_claims)]
 def rls_connection(
     state: State,
     claims: Claims,
+    client: Client,
     x_org_id: Annotated[uuid.UUID | None, Header()] = None,
 ) -> Iterator[psycopg.Connection]:
     """One transaction per request with the verified identity bound by set_context().
@@ -93,6 +95,8 @@ def rls_connection(
     connection can never carry it into the next request.
     """
     with state.pool.connection() as conn, conn.transaction():
+        if client.request_id:
+            conn.execute("SELECT set_config('secureai.request_id', %s, true)", (client.request_id,))
         try:
             conn.execute("SELECT secureai_rls.set_context(%s, %s)", (claims.user_id, x_org_id))
         except errors.InsufficientPrivilege:

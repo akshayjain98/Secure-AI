@@ -25,16 +25,18 @@ from psycopg import errors
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.deps import AppState, Claims, Client, State
-from app.api.email import reset_link
+from app.api.email import reset_link, verify_link
 from app.auth.passwords import PasswordPolicyError
 from app.auth.service import (
     ClientInfo,
     InvalidCredentials,
     InvalidRefreshToken,
     InvalidResetToken,
+    InvalidVerificationToken,
     RefreshTokenReuse,
     Session,
 )
+from app.auth.service import EMAIL_RE
 
 log = logging.getLogger("secureai.auth")
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -71,6 +73,16 @@ class ResetConfirmIn(_Strict):
 class ChangePasswordIn(_Strict):
     current_password: str = Field(min_length=1, max_length=1024)
     new_password: str = Field(min_length=1, max_length=1024)
+
+
+class RegisterIn(_Strict):
+    email: str = Field(min_length=3, max_length=320)
+    display_name: str = Field(min_length=1, max_length=200)
+
+
+class VerifyEmailIn(_Strict):
+    token: str = Field(min_length=10, max_length=128)
+    password: str = Field(min_length=1, max_length=1024)
 
 
 class Message(BaseModel):
@@ -133,7 +145,10 @@ def refresh(
             session = state.service.refresh(conn, refresh_token, client)
         except InvalidRefreshToken as exc:
             if isinstance(exc, RefreshTokenReuse):
-                log.warning("refresh token reuse detected ip=%s", client.ip)
+                # Security alert: page on this (a stolen refresh token was replayed).
+                log.warning("security_alert refresh_token_reuse", extra={
+                    "event": "refresh_token_reuse", "user_id": str(exc.user_id),
+                    "request_id": client.request_id, "ip": client.ip})
             # Raising would discard the Set-Cookie on `response`, so return an
             # explicit 401 that clears the cookie.
             err = Response(status_code=status.HTTP_401_UNAUTHORIZED,
@@ -208,3 +223,48 @@ def change_password(body: ChangePasswordIn, claims: Claims, state: State, client
         except InvalidCredentials:
             # 403, not 401: the session is fine, the confirmation is not.
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Current password is incorrect") from None
+
+
+# ------------------------------------------------------------- registration
+_REGISTER_ACCEPTED = "Check your inbox to finish creating your account."
+
+
+def _process_registration(state: AppState, email: str, display_name: str, client: ClientInfo) -> None:
+    """Background task: DB work + email after the uniform 202 has been sent."""
+    try:
+        with state.pool.connection() as conn:
+            result = state.service.register(conn, email, display_name, client)
+        if result.verification_token:
+            state.mailer.send_email_verification(
+                result.email, verify_link(state.settings.public_url, result.verification_token))
+        elif result.outcome == "exists":
+            # Tell the real owner, not the requester, that the account exists.
+            state.mailer.send_account_exists(result.email, f"{state.settings.public_url}/reset-password")
+    except Exception:  # noqa: BLE001
+        log.exception("registration processing failed")
+
+
+@router.post("/register", status_code=status.HTTP_202_ACCEPTED, response_model=Message)
+def register(body: RegisterIn, background: BackgroundTasks, state: State, client: Client) -> Message:
+    state.limiter.hit("register_ip", client.ip, *state.settings.register_per_ip)
+    # Validate format synchronously: a 422 for a malformed address says nothing
+    # about whether an account exists.
+    from app.auth.service import EMAIL_RE
+    email = _norm(body.email)
+    if not EMAIL_RE.fullmatch(email) or not body.display_name.strip():
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Enter a valid email and name")
+    background.add_task(_process_registration, state, email, body.display_name, client)
+    return Message(detail=_REGISTER_ACCEPTED)
+
+
+@router.post("/verify-email", status_code=status.HTTP_204_NO_CONTENT)
+def verify_email(body: VerifyEmailIn, state: State, client: Client) -> None:
+    """Proves inbox ownership and sets the password. The user then signs in."""
+    state.limiter.hit("register_ip", client.ip, *state.settings.register_per_ip)
+    with state.pool.connection() as conn:
+        try:
+            state.service.verify_email(conn, body.token, body.password, client)
+        except PasswordPolicyError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
+        except InvalidVerificationToken:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired verification link") from None

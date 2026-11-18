@@ -490,6 +490,6 @@ uv run pytest -v                # rebuilds the separate secureai_test DB from sc
 - **Pre-auth paths** (login, registration, refresh rotation, password reset) need narrow SECURITY DEFINER functions in a new `secureai_auth` schema with their own definer role. These are Phase 2.
 - **`refresh_token_sessions` rotation** must be atomic (`SELECT … FOR UPDATE`) to make reuse detection race-safe. This is Phase 2.
 - **Audit integrity against a DB superuser** isn't covered. Ship logs to an external append-only sink, or add hash chaining, in a later phase.
-- **Last-admin lockout:** an admin can demote the only other admin. Consider a "≥1 active org_admin" trigger.
+- ~~**Last-admin lockout:** an admin can demote the only other admin.~~ **Fixed in Phase 2 (migration 0005):** `organization_memberships_last_admin` trigger with a per-org advisory lock; see phase-2 doc §11.
 - **Connection poolers:** PgBouncer in *transaction* mode is compatible with this design. *Session* mode is too, thanks to the stamp, but don't use statement mode.
 - **Messages with `role='system'`** can be inserted by the app on the user's behalf. The AI-security phase must ensure user input can never be stored or replayed as system/tool content.

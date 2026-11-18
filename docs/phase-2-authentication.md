@@ -1,6 +1,6 @@
 # SecureAI Workspace — Phase 2: Authentication
 
-**Status:** steps 1–2 of 3 done: DB auth layer, auth core, JWT and HTTP API. Hardening is next (§11).
+**Status:** ✅ complete (steps 1–3): DB auth layer, auth core, JWT + HTTP API, registration and hardening. Phase 3 is next (§12).
 
 Read [phase-1-database-architecture.md](phase-1-database-architecture.md) first. This phase builds on its roles, RLS context (`set_context`) and audit log.
 
@@ -9,6 +9,8 @@ Read [phase-1-database-architecture.md](phase-1-database-architecture.md) first.
 | Definer role (fresh volumes) | [docker/postgres/init/00-bootstrap.sh](../docker/postgres/init/00-bootstrap.sh) |
 | Definer role (existing volumes) | [docker/postgres/upgrades/0004_auth_definer_role.sh](../docker/postgres/upgrades/0004_auth_definer_role.sh) |
 | Auth functions | [migrations/versions/0004_auth_functions.py](../migrations/versions/0004_auth_functions.py) |
+| Registration, request ids, last-admin guard | [migrations/versions/0005_registration_hardening.py](../migrations/versions/0005_registration_hardening.py) |
+| Breached-password check | [app/auth/breach.py](../app/auth/breach.py) |
 | Argon2id + password policy | [app/auth/passwords.py](../app/auth/passwords.py) |
 | Opaque tokens + HMAC | [app/auth/tokens.py](../app/auth/tokens.py) |
 | Flows (login/refresh/logout/reset/change) | [app/auth/service.py](../app/auth/service.py) |
@@ -118,7 +120,7 @@ The visible prefixes let secret scanners and log redaction recognise leaked toke
 ## 8. Testing
 
 ```bash
-uv run pytest -v          # 312 passed (202 Phase 1 + 110 Phase 2)
+uv run pytest -v          # 339 passed (202 Phase 1 + 137 Phase 2)
 ```
 
 | Area | Tests |
@@ -131,7 +133,7 @@ uv run pytest -v          # 312 passed (202 Phase 1 + 110 Phase 2)
 | Service (e2e) | login→refresh→logout; same error for wrong password and unknown email; lockout; transparent rehash; replay kills attacker and victim; reset and change flows; autocommit guard |
 | Primitives | Argon2 params, NFKC, rehash detection, policy, token format, HMAC keying, pepper handling |
 
-**Mutation checks run:** raising `c_max_failures` to 500 fails 2 lockout tests. Disabling the `rotated` branch fails 3 reuse/race tests. Disabling the CSRF-header check fails 2 API tests. Ignoring `X-Org-Id` fails 2 API tests.
+**Mutation checks run:** raising `c_max_failures` to 500 fails 2 lockout tests. Disabling the `rotated` branch fails 3 reuse/race tests. Disabling the CSRF-header check fails 2 API tests. Ignoring `X-Org-Id` fails 2 API tests. Disabling the last-admin count fails both race tests. Skipping the breach check fails the breach API test.
 
 ## 9. Operations
 
@@ -167,13 +169,49 @@ uv run uvicorn app.api.main:create_app --factory --port 8000   # docs at /docs (
 
 **Edge hardening.** Per-IP and per-email fixed-window rate limits return 429 with `Retry-After`. The limiter is **in-process**, so multiple workers need Redis behind the same interface. The client IP is the validated direct peer only; `X-Forwarded-For` is never parsed (use uvicorn `--forwarded-allow-ips` behind a trusted proxy). Request models forbid extra fields. Every response gets `no-store`, `nosniff`, `DENY`, `no-referrer` and a `default-src 'none'` CSP. Unhandled errors return a bare 500 with no SQL or stack trace. `/docs` and `/openapi.json` are disabled in production.
 
-## 11. Next steps
+## 11. Registration and hardening (step 3)
 
-**Step 3: hardening and registration**
-1. Registration with email verification (`email_verification_tokens` + definer functions) and enumeration-safe responses ("check your inbox" in every case).
-2. Breached-password check (HIBP k-anonymity range API; fail-open in dev, configurable in prod).
-3. Shared rate-limit store (Redis), plus a CAPTCHA/proof-of-work hook once an account hits its lockout threshold, to blunt lockout-as-DoS.
-4. "≥1 active org_admin" trigger (Phase 1 residual risk).
-5. Structured security logging (request id → `audit_logs.request_id`) and an alert on `auth.refresh_reuse_detected`.
+**Registration without a password (pre-account-takeover defence).**
 
-**Phase 3: authorization APIs.** Project, task and document CRUD on top of `RlsConn`, mapping "0 rows affected" to 404 (Phase 1 §8), plus API tests for the "Phase 2 adds" column of Phase 1 §8.2.
+| Step | Endpoint | DB function | Result |
+|---|---|---|---|
+| 1 | `POST /auth/register {email, display_name}` | `register_user` | `pending` user, **no credentials row**, 24 h verification token. Always 202 with the same body |
+| 2 | `POST /auth/verify-email {token, password}` | `verify_email_and_set_password` | Password set **and** account activated in one transaction. 204, then the user signs in |
+
+If registration accepted a password, an attacker could register `victim@corp` with a password they know. The account would sit pending until the victim registered or clicked a link, then go live with the attacker's password. Here, only the holder of the inbox ever chooses a password. Re-registering a pending address deletes earlier tokens, so a link the attacker obtained dies (tested in `test_pre_account_takeover_is_impossible`).
+
+Every registration outcome looks the same to the client. The DB work and the email run after the 202 is sent:
+
+| Outcome | Email sent |
+|---|---|
+| `created` / `resent` | verification link (`/verify-email#token=save_…`, fragment as in §10) |
+| `exists` (active account) | "you already have an account, reset your password here", sent to the **owner**, never shown to the requester |
+| `suppressed` (disabled/locked, or a concurrent duplicate) / `rate_limited` (>3 per address per hour) | none |
+
+The new `email_verification_tokens` table has the same posture as reset tokens: RLS forced, no policies, no app grants, hash only, CHECK caps the TTL at 24 h. The posture test that flags unclassified tables caught it until it was registered.
+
+**Breached passwords.** Every path that sets a password (verify, reset, change) runs the policy check and then `BreachChecker`. `HibpChecker` uses the Have I Been Pwned range API with k-anonymity (only 5 hex characters of SHA-1 leave the server) and `Add-Padding`. Padded zero-count rows are ignored. It **fails open** with a warning when the API is unavailable. `SECUREAI_BREACH_CHECK=hibp|off` defaults to `hibp` in production and `off` elsewhere, so dev and tests never call out.
+
+**Last-admin invariant (Phase 1 residual risk, now closed).** Sequentially, an org can't lose its last admin: RLS forbids self-edits, and the first demotion strips the second actor's rights. The real hole was **concurrency**. Two admins demoting or suspending each other in parallel both pass RLS. `AFTER UPDATE OF role_id, status OR DELETE` trigger `organization_memberships_last_admin`:
+1. Ignores rows that weren't, or still are, an active admin. "Admin" means the role grants `user.update`, a permission, not a role name.
+2. Takes `pg_advisory_xact_lock` on the org.
+3. Re-counts in a new statement, which under READ COMMITTED sees the other transaction's commit. If the count is zero, it raises `42501`.
+
+The counting helper `secureai_rls.active_admin_count` answers only for the current org, so it can't be used as a cross-tenant oracle. Trusted maintenance roles (BYPASSRLS) are exempt so ops can repair data. Tested with real parallel transactions for both demote and suspend.
+
+**Request correlation.** Middleware assigns a server-generated `X-Request-ID` to every response; a client-supplied one is ignored. Each auth transaction runs `set_config('secureai.request_id', …, true)`, and `secureai_auth.audit()` stamps it into `audit_logs.request_id`. One HTTP request can therefore be traced to every audit row it caused.
+
+**Security alert.** Refresh-token reuse logs `security_alert refresh_token_reuse` with structured `event`, `user_id`, `request_id` and `ip` fields, ready for a log-based alert rule.
+
+**Deliberately deferred:**
+- *Shared rate-limit store (Redis).* The limiter interface is ready, but adding Redis is an infrastructure choice (compose service, HA, auth) better made alongside deployment. Until then, run one worker or accept per-process limits.
+- *CAPTCHA/proof-of-work after the lockout threshold.* This needs a frontend to present the challenge.
+- *Cleanup of stale pending users.* A scheduled job to delete `pending` users older than N days with no live token.
+
+## 12. Next steps — Phase 3: authorization APIs
+
+1. Resource endpoints on top of `RlsConn`: organizations (read/update), members (invite/role change/remove, exercising the rank rules and the last-admin trigger), projects, project members, tasks, documents metadata.
+2. A `rows_or_404` helper: RLS-filtered UPDATE/DELETE that affects 0 rows becomes 404, never 403, so the API doesn't confirm that a row exists.
+3. Map DB errors (`42501` from triggers and WITH CHECK, `23503` FK) to 403/404/409 without leaking constraint names.
+4. Pagination with keyset cursors (no OFFSET scans over RLS-filtered sets).
+5. API tests that fill the "Phase 2 adds" column of Phase 1 §8.2, covering IDOR, cross-tenant ids, mass assignment (`extra="forbid"`) and privilege escalation via role changes.

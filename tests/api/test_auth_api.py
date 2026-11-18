@@ -211,8 +211,8 @@ def test_reset_request_response_is_identical_for_known_and_unknown_email(client,
     unknown = client.post("/auth/password-reset/request", json={"email": "ghost@nowhere.example"})
     assert (known.status_code, known.json()) == (unknown.status_code, unknown.json())
     assert known.status_code == 202
-    assert [to for to, _ in outbox.sent] == [u.email]
-    link = outbox.sent[0][1]
+    assert [(kind, to) for kind, to, _ in outbox.sent] == [("reset", u.email)]
+    link = outbox.sent[0][2]
     assert link.startswith("https://app.example/reset-password#token=sapr_")  # fragment, not query
 
 
@@ -220,7 +220,7 @@ def test_reset_confirm_flow(client, new_client, outbox, make_user):
     u = make_user()
     login(client, u.email, u.password)
     client.post("/auth/password-reset/request", json={"email": u.email})
-    token = outbox.sent[-1][1].split("#token=", 1)[1]
+    token = outbox.sent[-1][2].split("#token=", 1)[1]
 
     weak = client.post("/auth/password-reset/confirm", json={"token": token, "new_password": "short"})
     assert weak.status_code == 422 and "at least" in weak.json()["detail"]

@@ -16,6 +16,8 @@ log = logging.getLogger("secureai.email")
 
 class EmailSender(Protocol):
     def send_password_reset(self, to: str, link: str) -> None: ...
+    def send_email_verification(self, to: str, link: str) -> None: ...
+    def send_account_exists(self, to: str, reset_page: str) -> None: ...
 
 
 class ConsoleEmailSender:
@@ -28,15 +30,31 @@ class ConsoleEmailSender:
     def send_password_reset(self, to: str, link: str) -> None:
         log.warning("[dev email] password reset for %s: %s", to, link)
 
+    def send_email_verification(self, to: str, link: str) -> None:
+        log.warning("[dev email] verify email for %s: %s", to, link)
+
+    def send_account_exists(self, to: str, reset_page: str) -> None:
+        log.warning("[dev email] %s already has an account; reset at %s", to, reset_page)
+
 
 @dataclass
 class OutboxEmailSender:
-    """Collects messages in memory (tests)."""
-    sent: list[tuple[str, str]] = field(default_factory=list)
+    """Collects (kind, to, link) in memory (tests)."""
+    sent: list[tuple[str, str, str]] = field(default_factory=list)
 
     def send_password_reset(self, to: str, link: str) -> None:
-        self.sent.append((to, link))
+        self.sent.append(("reset", to, link))
+
+    def send_email_verification(self, to: str, link: str) -> None:
+        self.sent.append(("verify", to, link))
+
+    def send_account_exists(self, to: str, reset_page: str) -> None:
+        self.sent.append(("exists", to, reset_page))
 
 
 def reset_link(public_url: str, token: str) -> str:
     return f"{public_url}/reset-password#token={token}"
+
+
+def verify_link(public_url: str, token: str) -> str:
+    return f"{public_url}/verify-email#token={token}"

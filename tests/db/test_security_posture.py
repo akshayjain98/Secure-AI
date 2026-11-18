@@ -19,7 +19,7 @@ TENANT_TABLES = [
 ]
 RLS_TABLES = TENANT_TABLES + [
     "organizations", "users", "user_credentials", "refresh_token_sessions",
-    "password_reset_tokens", "audit_logs",
+    "password_reset_tokens", "email_verification_tokens", "audit_logs",
 ]
 GLOBAL_REFERENCE_TABLES = ["roles", "permissions", "role_permissions"]
 
@@ -114,6 +114,7 @@ def test_app_cannot_modify_rbac_catalogue_even_as_admin(app_conn, sql):
 @pytest.mark.parametrize("sql", [
     "SELECT password_hash FROM secureai.user_credentials",
     "SELECT * FROM secureai.password_reset_tokens",
+    "SELECT * FROM secureai.email_verification_tokens",
     "SELECT token_hash FROM secureai.refresh_token_sessions",
 ])
 def test_app_cannot_read_secrets(app_conn, sql):

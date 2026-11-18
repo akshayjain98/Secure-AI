@@ -7,7 +7,7 @@
   stolen tokens or compute valid ones.
 * The purpose prefix gives domain separation: a reset token can never hash to
   something the refresh table would accept, and vice versa.
-* Visible prefixes (``sart_`` / ``sapr_``) let secret scanners and log
+* Visible prefixes (``sart_`` / ``sapr_`` / ``save_``) let secret scanners and log
   redaction recognise leaked tokens.
 """
 
@@ -21,9 +21,9 @@ import secrets
 from dataclasses import dataclass
 from typing import Literal
 
-Purpose = Literal["refresh", "reset"]
+Purpose = Literal["refresh", "reset", "verify"]
 
-_PREFIX: dict[Purpose, str] = {"refresh": "sart_", "reset": "sapr_"}
+_PREFIX: dict[Purpose, str] = {"refresh": "sart_", "reset": "sapr_", "verify": "save_"}
 _TOKEN_BYTES = 32
 # token_urlsafe(32) -> 43 chars of [A-Za-z0-9_-]
 _BODY = re.compile(r"^[A-Za-z0-9_-]{43}$")

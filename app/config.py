@@ -57,6 +57,9 @@ class Settings:
     login_per_ip: tuple[int, int] = (20, 60)
     login_per_email: tuple[int, int] = (10, 900)
     reset_per_ip: tuple[int, int] = (5, 900)
+    register_per_ip: tuple[int, int] = (5, 900)
+    # "hibp" (k-anonymity range API) or "off". Default: on in production only.
+    breach_check: str = "off"
     refresh_per_ip: tuple[int, int] = (60, 60)
 
     @property
@@ -81,7 +84,11 @@ class Settings:
             jwt_keys=parse_jwt_keys(jwt_raw),
             token_pepper=pepper,
             public_url=os.environ.get("SECUREAI_PUBLIC_URL", cls.public_url).rstrip("/"),
+            breach_check=os.environ.get(
+                "SECUREAI_BREACH_CHECK", "hibp" if env == "production" else "off").lower(),
         )
+        if settings.breach_check not in ("hibp", "off"):
+            raise RuntimeError("SECUREAI_BREACH_CHECK must be 'hibp' or 'off'")
         if settings.is_production and not settings.public_url.startswith("https://"):
             raise RuntimeError("SECUREAI_PUBLIC_URL must be https in production")
         return settings
