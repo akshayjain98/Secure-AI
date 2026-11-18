@@ -75,3 +75,43 @@ def login(client: TestClient, email: str, password: str = PASSWORD) -> dict[str,
     r = client.post("/auth/login", json={"email": email, "password": password})
     assert r.status_code == 200, r.text
     return {"Authorization": f"Bearer {r.json()['access_token']}"}
+
+
+@pytest.fixture
+def auth_as(app) -> Callable[[str], dict[str, str]]:
+    """Bearer headers for a seed user, minted with the app's own codec.
+
+    Access tokens are stateless (signature + expiry), so this is equivalent to
+    logging in, without paying for Argon2 in every resource test. Login itself
+    is covered by test_auth_api.py.
+    """
+    import uuid
+
+    from app.db.seed_dev import ID
+
+    def _auth(user: str) -> dict[str, str]:
+        token, _ = app.state.secureai.codec.issue(ID.user(user), uuid.uuid4())
+        return {"Authorization": f"Bearer {token}"}
+    return _auth
+
+
+@pytest.fixture(autouse=True)
+def _purge_api_created_rows(admin_conn) -> Iterator[None]:
+    """API writes COMMIT, as in production. Delete everything that isn't seed
+    data after each test, so later tests (incl. tests/db's exact-set assertions)
+    always see pristine seed rows. Runs as the BYPASSRLS migrator."""
+    yield
+    from app.db.seed_dev import ID, PROJECTS, TASKS
+
+    seed_tasks = [ID.task(k) for k in TASKS]
+    seed_projects = [ID.project(k) for k in PROJECTS]
+    seed_members = [(ID.project(k), ID.user(u)) for k, (*_, members) in PROJECTS.items()
+                    for u, _ in members]
+    with admin_conn.transaction():
+        admin_conn.execute("DELETE FROM secureai.tasks WHERE NOT (id = ANY(%s))", (seed_tasks,))
+        admin_conn.execute(
+            "DELETE FROM secureai.project_members pm WHERE NOT EXISTS ("
+            "SELECT 1 FROM unnest(%s::uuid[], %s::uuid[]) s(p, u) "
+            "WHERE s.p = pm.project_id AND s.u = pm.user_id)",
+            ([p for p, _ in seed_members], [u for _, u in seed_members]))
+        admin_conn.execute("DELETE FROM secureai.projects WHERE NOT (id = ANY(%s))", (seed_projects,))

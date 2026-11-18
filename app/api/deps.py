@@ -81,16 +81,14 @@ def current_claims(
 Claims = Annotated[AccessClaims, Depends(current_claims)]
 
 
-def rls_connection(
-    state: State,
-    claims: Claims,
-    client: Client,
-    x_org_id: Annotated[uuid.UUID | None, Header()] = None,
-) -> Iterator[psycopg.Connection]:
+def _bound_connection(state: AppState, claims: AccessClaims, client: ClientInfo,
+                      org_id: uuid.UUID | None) -> Iterator[psycopg.Connection]:
     """One transaction per request with the verified identity bound by set_context().
 
-    The org comes from the X-Org-Id header and is NOT trusted: set_context()
-    re-checks that the membership and the org are active, and raises if not.
+    The org id (header or path) is NOT trusted: set_context() re-checks that
+    the membership and the org are active, and raises if not. A missing org,
+    another tenant's org and a suspended membership all get the SAME 403, so
+    the response can't be used to probe which org ids exist.
     The context is transaction-local (SET LOCAL semantics), so a pooled
     connection can never carry it into the next request.
     """
@@ -98,14 +96,31 @@ def rls_connection(
         if client.request_id:
             conn.execute("SELECT set_config('secureai.request_id', %s, true)", (client.request_id,))
         try:
-            conn.execute("SELECT secureai_rls.set_context(%s, %s)", (claims.user_id, x_org_id))
+            conn.execute("SELECT secureai_rls.set_context(%s, %s)", (claims.user_id, org_id))
         except errors.InsufficientPrivilege:
-            if x_org_id is not None:
+            if org_id is not None:
                 raise HTTPException(status.HTTP_403_FORBIDDEN, "No access to this organization") from None
             raise _UNAUTHENTICATED from None
         yield conn
 
 
+def rls_connection(
+    state: State,
+    claims: Claims,
+    client: Client,
+    x_org_id: Annotated[uuid.UUID | None, Header()] = None,
+) -> Iterator[psycopg.Connection]:
+    """For org-optional endpoints (/me): the org comes from the X-Org-Id header."""
+    yield from _bound_connection(state, claims, client, x_org_id)
+
+
+def org_connection(state: State, claims: Claims, client: Client,
+                   org_id: uuid.UUID) -> Iterator[psycopg.Connection]:
+    """For /orgs/{org_id}/...: the org comes from the path and is required."""
+    yield from _bound_connection(state, claims, client, org_id)
+
+
 # scope="function": COMMIT happens before the response is sent, so a client
 # never sees 200 for a write that then fails to commit.
 RlsConn = Annotated[psycopg.Connection, Depends(rls_connection, scope="function")]
+OrgConn = Annotated[psycopg.Connection, Depends(org_connection, scope="function")]
