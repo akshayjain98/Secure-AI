@@ -6,7 +6,7 @@ database security, multi-tenancy, API security and AI application security.
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Database architecture, RBAC model, PostgreSQL RLS, seed data, DB security tests | ✅ done |
-| 2 | Authentication (Argon2id, JWT, refresh rotation/reuse detection, reset) | 🚧 step 1/3: DB auth layer + auth core done; JWT + HTTP API next |
+| 2 | Authentication (Argon2id, JWT, refresh rotation/reuse detection, reset) | 🚧 steps 1–2/3 done (DB auth layer, JWT, HTTP API); hardening next |
 | 3+ | FastAPI authorization services, API tests, AI/LLM security, frontend | planned |
 
 Start with **[docs/phase-1-database-architecture.md](docs/phase-1-database-architecture.md)**, then
@@ -25,6 +25,7 @@ uv sync
 uv run alembic upgrade head
 uv run python -m app.db.seed_dev     # prints a generated dev password once
 uv run pytest -v                     # uses the separate secureai_test database
+uv run uvicorn app.api.main:create_app --factory --port 8000   # API, docs at /docs
 ```
 
 Postgres listens on `127.0.0.1:55432` only. The application will connect as
@@ -38,9 +39,11 @@ migrations/versions/0001_*             tables, constraints, composite FKs
 migrations/versions/0002_*             grants, RLS helpers, policies, invariant triggers
 migrations/versions/0003_*             roles, permissions, role->permission matrix
 migrations/versions/0004_*             secureai_auth: login, refresh rotation, reset (definer fns)
-app/auth/                              argon2id + policy, opaque tokens, auth flows
+app/auth/                              argon2id + policy, opaque tokens, JWT, auth flows
+app/api/                               FastAPI: /auth/*, /me, RLS-bound request transactions
 app/db/seed_dev.py                     fictional dev/test data (refuses in production)
 tests/db/                              DB-level security tests (RLS, grants, escalation, auth fns)
 tests/auth/                            auth primitives + end-to-end auth flows
+tests/api/                             HTTP-level tests (cookies, CSRF, JWT tampering, enumeration)
 docs/                                  architecture + security documentation
 ```

@@ -1,6 +1,6 @@
 # SecureAI Workspace — Phase 2: Authentication
 
-**Status:** step 1 of 3 done (DB auth layer + Python auth core). JWT and HTTP endpoints are next (§10).
+**Status:** steps 1–2 of 3 done: DB auth layer, auth core, JWT and HTTP API. Hardening is next (§11).
 
 Read [phase-1-database-architecture.md](phase-1-database-architecture.md) first. This phase builds on its roles, RLS context (`set_context`) and audit log.
 
@@ -12,7 +12,10 @@ Read [phase-1-database-architecture.md](phase-1-database-architecture.md) first.
 | Argon2id + password policy | [app/auth/passwords.py](../app/auth/passwords.py) |
 | Opaque tokens + HMAC | [app/auth/tokens.py](../app/auth/tokens.py) |
 | Flows (login/refresh/logout/reset/change) | [app/auth/service.py](../app/auth/service.py) |
-| Tests | [tests/db/test_auth_functions.py](../tests/db/test_auth_functions.py), [tests/auth/](../tests/auth/) |
+| Access tokens (JWT) | [app/auth/jwt_tokens.py](../app/auth/jwt_tokens.py) |
+| Settings (fail-fast env parsing) | [app/config.py](../app/config.py) |
+| HTTP API | [app/api/](../app/api/): `main.py`, `deps.py`, `routes_auth.py`, `routes_me.py`, `ratelimit.py`, `email.py` |
+| Tests | [tests/db/test_auth_functions.py](../tests/db/test_auth_functions.py), [tests/auth/](../tests/auth/), [tests/api/](../tests/api/) |
 
 ## 1. Problem
 
@@ -115,7 +118,7 @@ The visible prefixes let secret scanners and log redaction recognise leaked toke
 ## 8. Testing
 
 ```bash
-uv run pytest -v          # 273 passed (202 Phase 1 + 71 Phase 2)
+uv run pytest -v          # 312 passed (202 Phase 1 + 110 Phase 2)
 ```
 
 | Area | Tests |
@@ -128,7 +131,7 @@ uv run pytest -v          # 273 passed (202 Phase 1 + 71 Phase 2)
 | Service (e2e) | login→refresh→logout; same error for wrong password and unknown email; lockout; transparent rehash; replay kills attacker and victim; reset and change flows; autocommit guard |
 | Primitives | Argon2 params, NFKC, rehash detection, policy, token format, HMAC keying, pepper handling |
 
-**Mutation checks run:** raising `c_max_failures` to 500 fails 2 lockout tests. Disabling the `rotated` branch fails 3 reuse/race tests.
+**Mutation checks run:** raising `c_max_failures` to 500 fails 2 lockout tests. Disabling the `rotated` branch fails 3 reuse/race tests. Disabling the CSRF-header check fails 2 API tests. Ignoring `X-Org-Id` fails 2 API tests.
 
 ## 9. Operations
 
@@ -137,19 +140,40 @@ Existing dev volume, once:
 docker exec -i secureai-postgres bash < docker/postgres/upgrades/0004_auth_definer_role.sh
 uv run alembic upgrade head
 ```
-Add `SECUREAI_TOKEN_PEPPER` (`openssl rand -hex 32`) to `.env`. Rotating the pepper invalidates every outstanding refresh and reset token, which makes it a fast "log everyone out" switch.
+Add `SECUREAI_TOKEN_PEPPER` and `SECUREAI_JWT_KEYS` (see `.env.example`) to `.env`, then run:
+```bash
+uv run uvicorn app.api.main:create_app --factory --port 8000   # docs at /docs (dev only)
+``` Rotating the pepper invalidates every outstanding refresh and reset token, which makes it a fast "log everyone out" switch.
 
-## 10. Next steps
+## 10. HTTP API (step 2)
 
-**Step 2: tokens and HTTP API**
-1. Access tokens: short-lived JWT (10–15 min), pinned algorithm, required `iss/aud/exp/iat/sub/jti`, key from env with a `kid` for rotation.
-2. FastAPI app: `/auth/login`, `/auth/refresh`, `/auth/logout`, `/auth/password-reset/request`, `/auth/password-reset/confirm`, `/auth/password/change`, `/me`.
-3. Refresh token in an `HttpOnly; Secure; SameSite=Strict; Path=/auth` cookie; access token in the response body.
-4. Request dependency: verify JWT, then `BEGIN; set_context(sub, X-Org-Id)` per request. Map "0 rows affected" to 404 (Phase 1 §8).
-5. Uniform error responses, async email sender (console sink in dev), per-IP and per-email rate limiting in front of login and reset.
+| Endpoint | Auth | Success | Failure (always generic) |
+|---|---|---|---|
+| `POST /auth/login` | — | 200 `{access_token, expires_in}` + refresh cookie | 401 `Invalid email or password` (unknown, wrong, locked and disabled all look the same) |
+| `POST /auth/refresh` | cookie + `X-SecureAI-CSRF: 1` | 200 new access token + rotated cookie | 401, cookie cleared |
+| `POST /auth/logout` | cookie + CSRF header | 204, family revoked, cookie cleared | — (idempotent) |
+| `POST /auth/password-reset/request` | — | **always** 202, same body | — |
+| `POST /auth/password-reset/confirm` | reset token | 204, all sessions revoked | 400 invalid/expired, 422 policy |
+| `POST /auth/password/change` | Bearer | 204, other devices logged out | 403 wrong current password, 422 policy |
+| `GET /me` (+ optional `X-Org-Id`) | Bearer | profile, orgs, and in org context the **live** role and permissions | 401 / 403 `No access to this organization` |
 
-**Step 3: hardening**
-6. Registration with email verification (needs an `email_verification_tokens` table plus definer functions) and enumeration-safe responses.
-7. Breached-password check (HIBP k-anonymity range API, optional and fail-open in dev).
-8. "≥1 active org_admin" trigger (Phase 1 residual risk).
-9. API-level tests that fill the "Phase 2 adds" column of Phase 1 §8.2.
+**Access token.** HS256 JWT, 10 min. Header `typ: at+jwt` and a `kid` from a keyset (the first key signs, all verify), so keys rotate without logging anyone out. The algorithm is pinned on decode. Required claims are `iss aud sub sid iat nbf exp jti`. The token carries **no roles or permissions**: authorization is evaluated live in PostgreSQL on every request, so a revocation applies to the very next request even with the same JWT (tested). `sid` is the refresh family, which lets password change keep the current device.
+
+**Request pipeline.** `Bearer` → `codec.verify` → `pool.connection()` → `BEGIN` → `set_context(sub, X-Org-Id)` → handler → `COMMIT`. The org header is untrusted input: the DB rejects a foreign or inactive org with 403. The dependency uses `scope="function"`, so COMMIT happens **before** the response is sent. A disabled user's still-valid JWT fails at `set_context` (401).
+
+**Refresh token transport.** `__Secure-secureai_refresh` cookie with `HttpOnly; Secure; SameSite=Strict; Path=/auth`. It never appears in a response body, so XSS can't read it. Cookie-authenticated endpoints also require `X-SecureAI-CSRF: 1`, which a cross-site request can't set without a CORS preflight that this API never approves.
+
+**Password reset.** The DB call and the email both run in a background task after the 202 is sent, so latency doesn't reveal whether the account exists. The link carries the token in the URL **fragment** (`/reset-password#token=…`), so it never reaches server logs, proxies or `Referer`.
+
+**Edge hardening.** Per-IP and per-email fixed-window rate limits return 429 with `Retry-After`. The limiter is **in-process**, so multiple workers need Redis behind the same interface. The client IP is the validated direct peer only; `X-Forwarded-For` is never parsed (use uvicorn `--forwarded-allow-ips` behind a trusted proxy). Request models forbid extra fields. Every response gets `no-store`, `nosniff`, `DENY`, `no-referrer` and a `default-src 'none'` CSP. Unhandled errors return a bare 500 with no SQL or stack trace. `/docs` and `/openapi.json` are disabled in production.
+
+## 11. Next steps
+
+**Step 3: hardening and registration**
+1. Registration with email verification (`email_verification_tokens` + definer functions) and enumeration-safe responses ("check your inbox" in every case).
+2. Breached-password check (HIBP k-anonymity range API; fail-open in dev, configurable in prod).
+3. Shared rate-limit store (Redis), plus a CAPTCHA/proof-of-work hook once an account hits its lockout threshold, to blunt lockout-as-DoS.
+4. "≥1 active org_admin" trigger (Phase 1 residual risk).
+5. Structured security logging (request id → `audit_logs.request_id`) and an alert on `auth.refresh_reuse_detected`.
+
+**Phase 3: authorization APIs.** Project, task and document CRUD on top of `RlsConn`, mapping "0 rows affected" to 404 (Phase 1 §8), plus API tests for the "Phase 2 adds" column of Phase 1 §8.2.
