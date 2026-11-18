@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter
+from datetime import datetime
+
+from fastapi import APIRouter, HTTPException, Response, status
+from psycopg.rows import dict_row
 from pydantic import BaseModel
 
 from app.api.deps import RlsConn
@@ -59,3 +62,40 @@ def me(conn: RlsConn) -> MeOut:
         current = CurrentOrgOut(id=org_id, role=role, permissions=perms)
     return MeOut(id=uid, email=email, display_name=display_name, organizations=orgs,
                  current_org=current)
+
+
+# ------------------------------------------------------------------ invitations
+# The invitee has no org context for the inviting org yet (set_context needs an
+# active membership), and the tenant fence hides rows outside the context org.
+# So the invitee's side goes through two narrow definer functions that only
+# ever touch the caller's own invited rows (migration 0006).
+class InvitationOut(BaseModel):
+    organization_id: uuid.UUID
+    organization_name: str
+    role: str
+    invited_at: datetime
+
+
+@router.get("/me/invitations", response_model=list[InvitationOut])
+def my_invitations(conn: RlsConn) -> list[InvitationOut]:
+    rows = conn.cursor(row_factory=dict_row).execute(
+        "SELECT * FROM secureai_auth.my_invitations()").fetchall()
+    return [InvitationOut(**r) for r in rows]
+
+
+def _respond(conn, org_id: uuid.UUID, accept: bool) -> Response:
+    ok = conn.execute("SELECT secureai_auth.respond_to_invitation(%s, %s)",
+                      (org_id, accept)).fetchone()[0]
+    if not ok:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Invitation not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/me/invitations/{org_id}/accept", status_code=status.HTTP_204_NO_CONTENT)
+def accept_invitation(conn: RlsConn, org_id: uuid.UUID) -> Response:
+    return _respond(conn, org_id, True)
+
+
+@router.post("/me/invitations/{org_id}/decline", status_code=status.HTTP_204_NO_CONTENT)
+def decline_invitation(conn: RlsConn, org_id: uuid.UUID) -> Response:
+    return _respond(conn, org_id, False)

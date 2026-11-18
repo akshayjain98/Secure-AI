@@ -101,7 +101,7 @@ def _purge_api_created_rows(admin_conn) -> Iterator[None]:
     data after each test, so later tests (incl. tests/db's exact-set assertions)
     always see pristine seed rows. Runs as the BYPASSRLS migrator."""
     yield
-    from app.db.seed_dev import ID, PROJECTS, TASKS
+    from app.db.seed_dev import ID, MEMBERSHIPS, ORGS, PROJECTS, TASKS
 
     seed_tasks = [ID.task(k) for k in TASKS]
     seed_projects = [ID.project(k) for k in PROJECTS]
@@ -115,3 +115,21 @@ def _purge_api_created_rows(admin_conn) -> Iterator[None]:
             "WHERE s.p = pm.project_id AND s.u = pm.user_id)",
             ([p for p, _ in seed_members], [u for _, u in seed_members]))
         admin_conn.execute("DELETE FROM secureai.projects WHERE NOT (id = ANY(%s))", (seed_projects,))
+        # Org/member administration (no seed overrides exist).
+        admin_conn.execute("DELETE FROM secureai.user_permission_overrides")
+        orgs, users, roles = zip(*[(ID.org(o), ID.user(u), r) for o, u, r in MEMBERSHIPS])
+        admin_conn.execute(
+            "DELETE FROM secureai.organization_memberships m WHERE m.organization_id = ANY(%s) "
+            "AND NOT EXISTS (SELECT 1 FROM unnest(%s::uuid[], %s::uuid[]) s(o, u) "
+            "WHERE s.o = m.organization_id AND s.u = m.user_id)",
+            (list(set(orgs)), list(orgs), list(users)))
+        admin_conn.execute(
+            "UPDATE secureai.organization_memberships m SET role_id = r.id, status = 'active' "
+            "FROM unnest(%s::uuid[], %s::uuid[], %s::text[]) s(o, u, k) "
+            "JOIN secureai.roles r ON r.key = s.k "
+            "WHERE m.organization_id = s.o AND m.user_id = s.u "
+            "AND (m.role_id <> r.id OR m.status <> 'active')",
+            (list(orgs), list(users), list(roles)))
+        for key, (name, _) in ORGS.items():
+            admin_conn.execute("UPDATE secureai.organizations SET name = %s "
+                               "WHERE id = %s AND name <> %s", (name, ID.org(key), name))

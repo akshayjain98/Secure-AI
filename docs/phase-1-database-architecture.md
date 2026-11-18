@@ -352,7 +352,7 @@ USING (organization_id = current_org_id())  WITH CHECK (organization_id = curren
 
 #### organization_memberships
 - `memberships_select`: own row ∨ `user.read`.
-- `memberships_insert`: `user.create` ∧ not self ∧ `invited_by = me` ∧ status invited/active ∧ `can_assign_role(role_id)`.
+- `memberships_insert`: `user.create` ∧ not self ∧ `invited_by = me` ∧ status `invited` ∧ `can_assign_role(role_id)`. (Phase 1 also allowed `active`; migration 0006 removed that, so only the invitee activates a membership. See phase-3 doc §8.3.)
 - `memberships_update`: USING (old row) requires `user.update`, not self, and target rank ≤ mine. WITH CHECK (new row) requires the new role to be assignable by me, and `removed` requires `user.delete`.
 - No DELETE: members are `removed`, preserving FK history.
 

@@ -206,7 +206,7 @@ The counting helper `secureai_rls.active_admin_count` answers only for the curre
 **Deliberately deferred:**
 - *Shared rate-limit store (Redis).* The limiter interface is ready, but adding Redis is an infrastructure choice (compose service, HA, auth) better made alongside deployment. Until then, run one worker or accept per-process limits.
 - *CAPTCHA/proof-of-work after the lockout threshold.* This needs a frontend to present the challenge.
-- *Cleanup of stale pending users.* A scheduled job to delete `pending` users older than N days with no live token.
+- *Cleanup of stale pending users.* A scheduled job to delete `pending` users older than N days with no live token. Phase 3 invites create pending users too (phase-3 doc §8.2), so the job must skip those that still hold an `invited` membership.
 
 ## 12. Next steps — Phase 3: authorization APIs
 

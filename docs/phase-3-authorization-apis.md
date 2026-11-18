@@ -1,6 +1,6 @@
 # SecureAI Workspace — Phase 3: Authorization APIs
 
-**Status:** step 1 of 3 done (shared building blocks, projects, project members, tasks). Step 2 (organization, members, overrides) is next (§8).
+**Status:** steps 1–2 of 3 done: shared building blocks, projects, project members, tasks (step 1); organization, members, invitations, permission overrides (step 2, §8). Step 3 (documents, audit) is next (§9).
 
 Read [phase-1-database-architecture.md](phase-1-database-architecture.md) §5–§6 first. This phase adds **no authorization logic in Python**. The handlers issue plain SQL inside an RLS-bound transaction, and Phase 1's policies and triggers decide. The API layer has three jobs:
 
@@ -17,7 +17,10 @@ Read [phase-1-database-architecture.md](phase-1-database-architecture.md) §5–
 | Strict request models | [app/api/models.py](../app/api/models.py) |
 | Projects + project members | [app/api/routes_projects.py](../app/api/routes_projects.py) |
 | Tasks | [app/api/routes_tasks.py](../app/api/routes_tasks.py) |
-| Tests | [tests/api/test_projects_api.py](../tests/api/test_projects_api.py), [tests/api/test_tasks_api.py](../tests/api/test_tasks_api.py) |
+| Organization, members, overrides | [app/api/routes_org.py](../app/api/routes_org.py) |
+| Invitations (invitee side) | [app/api/routes_me.py](../app/api/routes_me.py) |
+| Invite resolver, consent rule, logout on removal | [migrations/versions/0006_org_membership_admin.py](../migrations/versions/0006_org_membership_admin.py) |
+| Tests | [tests/api/test_projects_api.py](../tests/api/test_projects_api.py), [tests/api/test_tasks_api.py](../tests/api/test_tasks_api.py), [tests/api/test_org_members_api.py](../tests/api/test_org_members_api.py), [tests/db/test_membership_admin.py](../tests/db/test_membership_admin.py) |
 
 ## 1. Endpoints (step 1)
 
@@ -118,7 +121,101 @@ uv run pytest tests/api -v
 | Path org ignored (`set_context(user, NULL)`) | 18 |
 | Task owner hard-coded instead of `current_user_id()` | 2 |
 
-## 8. Next steps
+## 8. Step 2: organization, members, invitations, overrides
 
-- **Step 2: organization and members.** `GET/PATCH /orgs/{org}` (`organization.update`, name only). Members: list, invite (needs a narrow definer function, because RLS rightly hides users outside the org from an email lookup), role change and removal. These exercise the rank rules, the not-self rule, `removed`→`user.delete` and the last-admin trigger (→ 409). Permission overrides: grant/deny/expire, "you can't delegate what you don't hold". Membership changes should also revoke the member's refresh sessions (`membership_revoked`).
+### 8.1 Endpoints
+
+| Method | Path | DB rule that decides |
+|---|---|---|
+| GET | `/orgs/{org}` | `organizations_select_member` (any active member) |
+| PATCH | `/orgs/{org}` | `organizations_update_admin`: `organization.update`; `name` only (column grant) |
+| GET | `/orgs/{org}/members?status=&cursor=&limit=` | `memberships_select`: own row ∨ `user.read` |
+| GET | `/orgs/{org}/members/{user}` | same |
+| POST | `/orgs/{org}/members` `{email, role}` | `resolve_invitee()` (`user.create`), then `memberships_insert` |
+| PATCH | `/orgs/{org}/members/{user}` `{role?, status?: active\|suspended}` | `memberships_update` (`user.update`, rank, not self) + transition trigger + last-admin trigger |
+| DELETE | `/orgs/{org}/members/{user}` | `memberships_update` with `status='removed'` (+ `user.delete`) |
+| GET | `/orgs/{org}/members/{user}/overrides` | `overrides_select`: own ∨ `permission.manage` |
+| PUT / DELETE | `/orgs/{org}/members/{user}/overrides/{permission}` | `overrides_insert/update/delete` |
+| GET | `/me/invitations` | `secureai_auth.my_invitations()` |
+| POST | `/me/invitations/{org}/accept` · `/decline` | `secureai_auth.respond_to_invitation()` |
+
+`DELETE /members/{user}` doesn't delete the row. It sets `removed`. The membership row anchors the member's tasks, projects and documents (composite FKs), and the app role has no DELETE grant on memberships.
+
+### 8.2 Inviting by email without an email-lookup oracle
+
+RLS hides every user outside the current org, so the API can't run `SELECT id FROM users WHERE email = …` for an invitee. That's correct, and it shouldn't be loosened. `secureai_auth.resolve_invitee(email)` is the narrow exception:
+
+- It runs only for a caller holding `user.create` **in the context org** (otherwise 42501, shown as 403 "Not allowed to invite members").
+- It returns the user id for the address. When there's no account, it creates a **pending, passwordless** identity. The address owner later sets the password through the normal register → verify flow (Phase 2), so the inviter never controls credentials (no pre-account takeover). The display name is the email's local part, not inviter-supplied text.
+- It only resolves the identity. The membership row is still INSERTed by the app **under RLS**, so `memberships_insert` keeps deciding role assignability and rank. If RLS refuses (e.g. `role: super_admin`), the pending identity is rolled back with the transaction (`test_refused_invite_rolls_back_the_pending_identity`).
+
+**No account enumeration.** An existing and an unknown address get the same status code and the same body. While a membership is `invited`, `display_name` is withheld (`null`). Otherwise an existing account would show its real name and a new one its email local part. Re-inviting a current member is a 409, but that only says something about the caller's own org, which they can already list.
+
+**Accepted risk.** Each invite of an unknown address creates a `pending` user row. Invites are rate-limited per inviter (30/hour, in-process limiter, §Phase 2 caveat), and stale pending users join the cleanup job already deferred in Phase 2.
+
+### 8.3 Consent: only the invitee activates a membership
+
+Phase 1's `memberships_insert` accepted `status IN ('invited','active')`, and `memberships_update` let an admin set any status. Together that meant an admin could put any user into their org as `active` without asking: the user would suddenly see the org in `/me`, which is a phishing vector. Migration 0006 closes that:
+
+- `memberships_insert` now requires `status = 'invited'`.
+- An `AFTER UPDATE OF status` trigger allows only these transitions for the app role: `active ↔ suspended`, `{invited, active, suspended} → removed`, `removed → invited`. Anything else, notably `invited/removed → active`, raises 42501 and is shown as 403 *"Membership status cannot change from invited to active"*.
+- The invitee accepts or declines through `respond_to_invitation(org, accept)`, which updates only `WHERE user_id = current_user_id() AND status = 'invited'`. It runs as `secureai_auth_definer` (BYPASSRLS), which the trigger treats as a trusted path. The invitee needs a definer function because, before accepting, they have no org context and the tenant fence hides the row from them.
+
+The accept link in the email carries **no token**. Accepting requires signing in as the invited address, so a forwarded or leaked email grants nothing.
+
+### 8.4 Rank, self-edit and last-admin
+
+These are all Phase 1 rules. The API only maps the outcome:
+
+| Attempt | Result |
+|---|---|
+| Change a member without `user.update` (manager, employee) | 403: the row is visible, the update affects 0 rows |
+| Change a member who outranks me, or assign a role above mine / `super_admin` | 403 |
+| Change or remove my own membership | 403 (`user_id <> me` in USING) |
+| Viewer (no `user.read`) touches someone else | 404: the row is hidden |
+| Two admins demote/remove each other concurrently | the second gets **409** "An organization must keep at least one active administrator" |
+
+Sequentially, the last-admin 409 can't be reached through the API at all. Self-edits are refused, and the first demotion strips the second actor's rights. `test_racing_admins_cannot_leave_zero_admins` reproduces the race deterministically. A side transaction (Rahul demotes Akshay) holds the per-org advisory lock. The API request (Akshay demotes or removes Rahul) is started in a thread, the test waits until `pg_locks` shows it blocked, then commits the side transaction.
+
+Role changes take effect on the next request (`test_admin_changes_role_and_it_applies_on_the_next_request`), because access tokens carry no roles.
+
+### 8.5 Logout on removal
+
+When an `active` membership becomes `suspended` or `removed`, the trigger `organization_memberships_revoke_sessions` revokes every active refresh session of that user (`revoked_reason = 'membership_revoked'`) and writes an `auth.sessions_revoked` audit row. It's a trigger, not an API step, so no code path (API, ops script, future endpoint) can forget it, and it commits or rolls back with the status change.
+
+- **Org access** ends on the member's **next request**, independently of this. `set_context()` requires an active membership, and access tokens carry no roles.
+- **Sessions** are per user, not per org. So removal from one org signs the user out of all orgs, and they log in again to keep using the others. That's the conservative choice: a suspended person's devices stop refreshing.
+- The access token itself stays cryptographically valid until it expires (≤10 min, Phase 2 design). It's useless for the removed org, but still works for other orgs until expiry.
+- The trigger function locks the user's `user_credentials` row first, like every Phase 2 auth function. Without it, a concurrent refresh could insert a new session after the revoking UPDATE took its snapshot, and that session would survive.
+- Role changes don't revoke sessions (`test_role_change_keeps_sessions_and_reinstatement_works`), because permissions are evaluated live.
+
+### 8.6 Permission overrides
+
+`PUT …/overrides/{permission}` `{effect: grant|deny, reason, expires_at?}` creates or replaces (`INSERT … ON CONFLICT DO UPDATE`). Both the insert and the update path are checked by RLS:
+
+- `permission.manage`, never on yourself, and the target can't outrank you.
+- **You can't delegate what you don't hold.** A `grant` requires the caller to *effectively* hold the permission, after their own overrides. Turning an existing deny into a grant is the same delegation and is refused too. A `deny` is always allowed (for lower or equal ranks).
+- `expires_at` must be timezone-aware and in the future (422). After expiry, the override stays listed with `active: false` and is ignored by `has_permission`.
+- Overrides take effect on the caller's **next request** (`test_grant_and_deny_take_effect_on_the_next_request`).
+- Without `permission.manage`, the override list is empty for anyone but yourself. That's RLS answering, not a 403, because the member row itself is visible.
+- Unknown permission codes are 404 (the catalogue is public reference data). Malformed codes are 422.
+
+### 8.7 Tests and mutation checks
+
+[tests/api/test_org_members_api.py](../tests/api/test_org_members_api.py) (44 tests) and [tests/db/test_membership_admin.py](../tests/db/test_membership_admin.py) (25 tests). The DB tests exist because the API always sends `invited`: a regression in the insert policy or the transition trigger wouldn't show through the API. The API cleanup fixture restores seed memberships, roles and org names, and deletes all overrides.
+
+| Mutation | Failing tests |
+|---|---|
+| `display_name` shown while invited | 2 |
+| No savepoint around the invite INSERT (re-invite after decline) | 2 |
+| `resolve_invitee` skips the `user.create` check | 4 |
+| Insert policy allows `active` again | 1 |
+| Transition trigger allows `invited → active` | 2 |
+| `respond_to_invitation` ignores who the invitee is | 2 |
+| Session-revocation trigger never fires | 5 |
+| Override PUT skips the visible-member check | 1 |
+
+## 9. Next steps
+
 - **Step 3: documents and audit.** Document metadata CRUD (upload/storage is a later phase; `storage_key` is server-generated), `GET /orgs/{org}/audit-logs` (`audit.read`) with keyset pagination, an `audit_logs` row per API write, and a final pass filling Phase 1 §8.2's "Phase 2 adds" column.
+- Not covered by step 2, on purpose: leaving an org yourself (blocked by the not-self rule; needs its own definer function plus a last-admin check), org creation (ops-only), and a stale-invitation expiry.
