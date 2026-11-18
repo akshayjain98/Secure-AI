@@ -77,18 +77,19 @@ Paging = Annotated[PageParams, Depends(page_params)]
 
 def paginate(conn: psycopg.Connection, select: LiteralString, where: list[LiteralString],
              params: Sequence[Any], page: PageParams,
-             build: Callable[[dict[str, Any]], T]) -> Page[T]:
-    """``select`` is "SELECT ... FROM one_table"; every fragment is a code constant."""
+             build: Callable[[dict[str, Any]], T], ts: LiteralString = "created_at") -> Page[T]:
+    """``select`` is "SELECT ... FROM one_table"; every fragment is a code constant.
+    ``ts`` is the timestamp column the keyset orders on (audit_logs: occurred_at)."""
     clauses = list(where)
     args = list(params)
     if page.after is not None:
-        clauses.append("(created_at, id) < (%s, %s)")
+        clauses.append(f"({ts}, id) < (%s, %s)")
         args.extend(page.after)
     sql = select + (" WHERE " + " AND ".join(clauses) if clauses else "")
-    sql += " ORDER BY created_at DESC, id DESC LIMIT %s"
+    sql += f" ORDER BY {ts} DESC, id DESC LIMIT %s"
     rows = conn.cursor(row_factory=dict_row).execute(sql, [*args, page.limit + 1]).fetchall()
 
     more = len(rows) > page.limit
     rows = rows[:page.limit]
-    nxt = encode_cursor(rows[-1]["created_at"], rows[-1]["id"]) if more else None
+    nxt = encode_cursor(rows[-1][ts], rows[-1]["id"]) if more else None
     return Page[Any](items=[build(r) for r in rows], next_cursor=nxt)

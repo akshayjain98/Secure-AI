@@ -1,6 +1,6 @@
 # SecureAI Workspace — Phase 2: Authentication
 
-**Status:** ✅ complete (steps 1–3): DB auth layer, auth core, JWT + HTTP API, registration and hardening. Phase 3 is in progress: [phase-3-authorization-apis.md](phase-3-authorization-apis.md).
+**Status:** ✅ complete (steps 1–3): DB auth layer, auth core, JWT + HTTP API, registration and hardening. Phase 3 (authorization APIs) is also complete: [phase-3-authorization-apis.md](phase-3-authorization-apis.md).
 
 Read [phase-1-database-architecture.md](phase-1-database-architecture.md) first. This phase builds on its roles, RLS context (`set_context`) and audit log.
 

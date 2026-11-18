@@ -93,8 +93,12 @@ def _bound_connection(state: AppState, claims: AccessClaims, client: ClientInfo,
     connection can never carry it into the next request.
     """
     with state.pool.connection() as conn, conn.transaction():
-        if client.request_id:
-            conn.execute("SELECT set_config('secureai.request_id', %s, true)", (client.request_id,))
+        # Transaction-local request metadata for the write-audit trigger
+        # (migration 0007). The IP is already validated by _peer_ip().
+        conn.execute(
+            "SELECT set_config('secureai.request_id', %s, true), "
+            "set_config('secureai.client_ip', %s, true), set_config('secureai.user_agent', %s, true)",
+            (client.request_id or "", client.ip or "", client.user_agent or ""))
         try:
             conn.execute("SELECT secureai_rls.set_context(%s, %s)", (claims.user_id, org_id))
         except errors.InsufficientPrivilege:

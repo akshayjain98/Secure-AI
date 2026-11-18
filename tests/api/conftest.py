@@ -101,7 +101,7 @@ def _purge_api_created_rows(admin_conn) -> Iterator[None]:
     data after each test, so later tests (incl. tests/db's exact-set assertions)
     always see pristine seed rows. Runs as the BYPASSRLS migrator."""
     yield
-    from app.db.seed_dev import ID, MEMBERSHIPS, ORGS, PROJECTS, TASKS
+    from app.db.seed_dev import DOCUMENTS, ID, MEMBERSHIPS, ORGS, PROJECTS, TASKS
 
     seed_tasks = [ID.task(k) for k in TASKS]
     seed_projects = [ID.project(k) for k in PROJECTS]
@@ -109,6 +109,8 @@ def _purge_api_created_rows(admin_conn) -> Iterator[None]:
                     for u, _ in members]
     with admin_conn.transaction():
         admin_conn.execute("DELETE FROM secureai.tasks WHERE NOT (id = ANY(%s))", (seed_tasks,))
+        admin_conn.execute("DELETE FROM secureai.documents WHERE NOT (id = ANY(%s))",
+                           ([ID.document(k) for k in DOCUMENTS],))
         admin_conn.execute(
             "DELETE FROM secureai.project_members pm WHERE NOT EXISTS ("
             "SELECT 1 FROM unnest(%s::uuid[], %s::uuid[]) s(p, u) "

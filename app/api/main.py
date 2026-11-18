@@ -15,7 +15,15 @@ from fastapi.responses import JSONResponse
 from psycopg_pool import ConnectionPool
 
 from app.api import errors as db_errors
-from app.api import routes_auth, routes_me, routes_org, routes_projects, routes_tasks
+from app.api import (
+    routes_audit,
+    routes_auth,
+    routes_documents,
+    routes_me,
+    routes_org,
+    routes_projects,
+    routes_tasks,
+)
 from app.api.deps import AppState
 from app.api.email import ConsoleEmailSender, EmailSender
 from app.api.ratelimit import RateLimited, RateLimiter
@@ -117,4 +125,6 @@ def create_app(settings: Settings | None = None, pool: ConnectionPool | None = N
     app.include_router(routes_org.router)
     app.include_router(routes_projects.router)
     app.include_router(routes_tasks.router)
+    app.include_router(routes_documents.router)
+    app.include_router(routes_audit.router)
     return app

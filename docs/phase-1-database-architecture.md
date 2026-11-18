@@ -438,21 +438,21 @@ uv run pytest -v                # rebuilds the separate secureai_test DB from sc
 
 ### 8.2 Coverage against the brief (DB layer)
 
-| Brief item | Phase 1 (DB) tests | Phase 2 adds |
+| Brief item | Phase 1 (DB) tests | Phases 2–3 add (HTTP) |
 |---|---|---|
-| 1 Unauthenticated access | `test_no_context_*` | HTTP 401 tests |
-| 2 Expired JWT, 3 bad signature | — | JWT tests |
-| 4 Private tasks | `test_private_task_invisible_to_others` (7 cases) | API tests |
-| 5 Org isolation | `test_rls_tenant_isolation.py` | API tests |
-| 6 Self-promotion | `test_employee_cannot_promote_self` + related membership tests | API tests |
-| 7 Org id tampering | `test_cannot_insert_task_into_other_org`, `test_cannot_move_row_*`, `test_set_context_rejects_org_*` | body/query param tests |
-| 8 Unauthorized documents | `test_rls_documents_conversations.py` | — |
-| 9 Unauthorized UPDATE/DELETE | `test_task_update_authorization`, `test_task_delete_authorization`, `test_document_write_authorization` | — |
-| 10 Refresh reuse | (schema only) | rotation/reuse tests |
-| 11 Missing context | `test_no_context_*` (14 cases) | — |
-| 12 Omitted app filters | every unfiltered SELECT test | — |
-| 13 Pool leakage | `test_sqlalchemy_pool_reuse_does_not_leak_identity` + 5 related | middleware tests |
-| 14 Revocation | `test_permission_revocation_applies_to_next_transaction`, `test_role_downgrade_*` | API tests |
+| 1 Unauthenticated access | `test_no_context_*` | `test_unauthenticated_is_401`, `test_me_requires_bearer_token` |
+| 2 Expired JWT, 3 bad signature | — | `test_tampered_or_invalid_access_tokens_are_rejected`, `test_a_correctly_forged_token_would_work_proving_the_negative_tests_are_meaningful`, `test_key_rotation_old_kid_verifies_until_removed` |
+| 4 Private tasks | `test_private_task_invisible_to_others` (7 cases) | `test_private_task_idor_is_404_for_read_update_and_delete`, `test_private_content_never_enters_the_audit_log` |
+| 5 Org isolation | `test_rls_tenant_isolation.py` | `test_meera_sees_each_org_only_in_its_own_context`, `test_cross_tenant_task_and_project_ids_are_404`, `test_audit_log_is_tenant_scoped` |
+| 6 Self-promotion | `test_employee_cannot_promote_self` + related membership tests | `test_nobody_edits_their_own_membership`, `test_rank_rules`, `test_you_cannot_delegate_what_you_do_not_hold` |
+| 7 Org id tampering | `test_cannot_insert_task_into_other_org`, `test_cannot_move_row_*`, `test_set_context_rejects_org_*` | `test_foreign_and_nonexistent_orgs_get_the_same_403`, `test_foreign_org_header_is_rejected_by_the_database`, mass-assignment tests (`organization_id` in bodies) |
+| 8 Unauthorized documents | `test_rls_documents_conversations.py` | `test_document_list_is_exactly_the_rls_set`, `test_unauthorized_documents_are_404` |
+| 9 Unauthorized UPDATE/DELETE | `test_task_update_authorization`, `test_task_delete_authorization`, `test_document_write_authorization` | `test_update_is_403_when_visible_and_404_when_hidden`, `test_only_the_owner_updates`, `test_delete_rules` (projects, tasks, documents) |
+| 10 Refresh reuse | (schema only) | `test_stolen_refresh_cookie_replay_logs_everyone_out`, `tests/db/test_auth_functions.py` reuse tests |
+| 11 Missing context | `test_no_context_*` (14 cases) | every resource route depends on `OrgConn` (`set_context` per request); `test_unauthenticated_is_401` |
+| 12 Omitted app filters | every unfiltered SELECT test | handlers carry no owner/org filters; `test_task_list_is_exactly_the_rls_set`, `test_document_list_is_exactly_the_rls_set`, `test_directory_is_exactly_what_rls_allows` |
+| 13 Pool leakage | `test_sqlalchemy_pool_reuse_does_not_leak_identity` + 5 related | context is transaction-local; the API pool reuses connections across every HTTP test |
+| 14 Revocation | `test_permission_revocation_applies_to_next_transaction`, `test_role_downgrade_*` | `test_permission_revocation_applies_to_the_next_request`, `test_grant_and_deny_take_effect_on_the_next_request`, `test_removal_or_suspension_ends_the_members_sessions` |
 
 **Expected result:** `202 passed`. Negative tests expect either `InsufficientPrivilege` (SQLSTATE 42501, matched on message: `row-level security`, `permission denied`, or our own `secureai:` messages), `ForeignKeyViolation`, `CheckViolation`, or **0 affected rows**. RLS `USING` failures on UPDATE/DELETE are silent (0 rows); only `WITH CHECK` failures raise. Phase 2 must therefore turn "0 rows affected" into HTTP 404, which also avoids revealing that the row exists.
 
